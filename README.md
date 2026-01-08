@@ -108,26 +108,6 @@ ollama pull mistral
 * 📦 One-click installer (no technical setup)
 * 🧠 ONNX / GGUF model support
 
----
-
-## 📁 Project Structure (Frontend)
-
-```
-lib/
-├── main.dart
-├── ui/
-│   ├── header.dart
-│   ├── sidebar.dart
-│   ├── input_bar.dart
-│   └── message_bubble.dart
-├── widgets/
-│   └── glass.dart
-└── models/
-    └── message.dart
-```
-
----
-
 ## 🔒 Privacy Philosophy
 
 IRIS is designed with **privacy as a default**, not an option.
