@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'dart:ui';
 import 'package:window_manager/window_manager.dart';
+import 'api.dart';
+import 'dart:async';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -73,6 +75,40 @@ class Glass extends StatelessWidget {
   }
 }
 
+class BubbleGlass extends StatelessWidget {
+  final Widget child;
+  final BorderRadius borderRadius;
+  final double opacity;
+
+  const BubbleGlass({
+    super.key,
+    required this.child,
+    required this.borderRadius,
+    this.opacity = 0.18,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: borderRadius,
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(opacity),
+            borderRadius: borderRadius,
+            border: Border.all(
+              color: Colors.white.withOpacity(0.25),
+            ),
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
@@ -80,13 +116,26 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+class ChatMessage {
+  String text;
+  final bool isUser;
+  ChatMessage(this.text, {required this.isUser});
+}
+
 class _ChatScreenState extends State<ChatScreen>
     with SingleTickerProviderStateMixin {
-  final Map<String, List<_Message>> conversationMessages = {
+  final Map<String, List<ChatMessage>> conversationMessages = {
     'Chat with Alice': [],
     'Project IRIS': [],
     'Random Thoughts': [],
   };
+
+  final List<String> _charQueue = [];
+  Timer? _typingTimer;
+  bool _isTyping = false;
+  bool _isStreaming = false;
+
+
   final TextEditingController controller = TextEditingController();
   final ScrollController scrollController = ScrollController();
 
@@ -99,25 +148,45 @@ class _ChatScreenState extends State<ChatScreen>
     final text = controller.text.trim();
     if (text.isEmpty) return;
 
-    final conversation = conversations[selectedConversation];
+    final conversationKey = conversations[selectedConversation];
 
     setState(() {
-      conversationMessages[conversation]!.add(_Message(text, true));
-      conversationMessages[conversation]!.add(_Message("Thinking…", false));
+      // User message
+      conversationMessages[conversationKey]!
+          .add(ChatMessage(text, isUser: true));
+
+      // Assistant placeholder (empty, will stream into this)
+      conversationMessages[conversationKey]!
+          .add(ChatMessage("", isUser: false));
     });
 
     controller.clear();
 
-    // auto-scroll
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (scrollController.hasClients) {
-        scrollController.animateTo(
-          scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+    final assistantMessage =
+        conversationMessages[conversationKey]!.last;
+
+    _isStreaming = true;
+
+    IrisApi.streamMessage(text).listen(
+      (chunk) {
+        for (int i = 0; i < chunk.length; i++) {
+          _charQueue.add(chunk[i]);
+        }
+
+        if (!_isTyping) {
+          _startTyping(assistantMessage);
+        }
+      },
+      onDone: () {
+        _isStreaming = false;
+      },
+      onError: (e) {
+        _isStreaming = false;
+        setState(() {
+          assistantMessage.text += "\n\n⚠️ Error generating response.";
+        });
+      },
+    );
   }
 
   void addConversation() {
@@ -128,6 +197,36 @@ class _ChatScreenState extends State<ChatScreen>
       selectedConversation = newIndex;
     });
   }
+
+  void _startTyping(ChatMessage assistantMessage) {
+  _isTyping = true;
+
+  _typingTimer?.cancel();
+  _typingTimer = Timer.periodic(
+    const Duration(milliseconds:5), // Terminal-fast typing
+    (timer) {
+      if (_charQueue.isEmpty) {
+        if (!_isStreaming) {
+          timer.cancel();
+          _isTyping = false;
+        }
+        return;
+      }
+
+      setState(() {
+        assistantMessage.text += _charQueue.removeAt(0);
+      });
+
+      if (scrollController.hasClients) {
+        scrollController.jumpTo(
+          scrollController.position.maxScrollExtent,
+        );
+      }
+    },
+  );
+}
+
+
 
   void deleteConversation(int index) {
     final key = conversations[index];
@@ -241,7 +340,7 @@ class _ChatScreenState extends State<ChatScreen>
 }
 
 
-  List<_Message> get currentMessages {
+  List<ChatMessage> get currentMessages {
   if (conversationMessages.isEmpty) return [];
 
   final key = conversations[selectedConversation];
@@ -304,8 +403,16 @@ class _ChatScreenState extends State<ChatScreen>
                           padding: const EdgeInsets.all(16),
                           itemCount: currentMessages.length,
                           itemBuilder: (context, index) {
+                            final message = currentMessages[index];
+                            final isLastMessage =
+                                index == currentMessages.length - 1;
+                            final isTyping = isLastMessage &&
+                                !message.isUser &&
+                                (_isTyping || _isStreaming);
+
                             return MessageBubble(
-                              message: currentMessages[index],
+                              message: message,
+                              isTyping: isTyping,
                             );
                           },
                         ),
@@ -418,42 +525,102 @@ class _InputBar extends StatelessWidget {
   }
 }
 
-class MessageBubble extends StatelessWidget {
-  final _Message message;
+class BlinkingCursor extends StatefulWidget {
+  const BlinkingCursor({super.key});
 
-  const MessageBubble({super.key, required this.message});
+  @override
+  State<BlinkingCursor> createState() => _BlinkingCursorState();
+}
+
+class _BlinkingCursorState extends State<BlinkingCursor>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+      reverseDuration: const Duration(milliseconds: 500),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final alignment =
-        message.isUser ? Alignment.centerRight : Alignment.centerLeft;
-    final color =
-        message.isUser ? const Color(0xFF3A6DF0) : const Color(0xFF1A1D23);
-
-    return Align(
-      alignment: alignment,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 6),
-        padding: const EdgeInsets.all(14),
-        constraints: const BoxConstraints(maxWidth: 600),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Text(
-          message.text,
-          style: const TextStyle(fontSize: 15),
+    return FadeTransition(
+      opacity: _controller,
+      child: const Text(
+        " ●",
+        style: TextStyle(
+          fontSize: 15,
+          height: 1.4,
         ),
       ),
     );
   }
 }
 
-/* ---------- DATA MODEL ---------- */
+class MessageBubble extends StatelessWidget {
+  final ChatMessage message;
+  final bool isTyping;
 
-class _Message {
-  final String text;
-  final bool isUser;
+  const MessageBubble({
+    super.key,
+    required this.message,
+    this.isTyping = false,
+  });
 
-  _Message(this.text, this.isUser);
+  @override
+  Widget build(BuildContext context) {
+    final isUser = message.isUser;
+    final alignment = isUser ? Alignment.centerRight : Alignment.centerLeft;
+
+    final radius = BorderRadius.only(
+      topLeft: const Radius.circular(16),
+      topRight: const Radius.circular(16),
+      bottomLeft: isUser ? const Radius.circular(16) : const Radius.circular(4),
+      bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(16),
+    );
+
+    final maxBubbleWidth = MediaQuery.of(context).size.width * 0.7;
+
+    return Align(
+      alignment: alignment,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+        child: BubbleGlass(
+          borderRadius: radius,
+          opacity: isUser ? 0.22 : 0.16,
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: RichText(
+              text: TextSpan(
+                style: const TextStyle(
+                  fontSize: 15,
+                  height: 1.4,
+                  color: Colors.white,
+                ),
+                children: [
+                  TextSpan(text: message.text),
+                  if (isTyping)
+                    const WidgetSpan(
+                      alignment: PlaceholderAlignment.middle,
+                      child: BlinkingCursor(),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
